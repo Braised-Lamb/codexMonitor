@@ -1,0 +1,18 @@
+# 杂项文件和文件夹
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+tmp/
+temp/
+.cache/
+.vscode/
+.idea/
+
+# Python编译和打包文件
+*.pyc
+*.pyo
+*.pyd
+__pycache__/
+build/
+dist/

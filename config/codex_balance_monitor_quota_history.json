@@ -1,0 +1,275 @@
+{
+  "version": 1,
+  "snapshots": [
+    {
+      "at": 1785358371.3126917,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 61.0
+        }
+      ]
+    },
+    {
+      "at": 1785358430.5487733,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 61.0
+        }
+      ]
+    },
+    {
+      "at": 1785358490.1400387,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 61.0
+        }
+      ]
+    },
+    {
+      "at": 1785358550.1402895,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 62.0
+        }
+      ]
+    },
+    {
+      "at": 1785358644.0743926,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 62.0
+        }
+      ]
+    },
+    {
+      "at": 1785358692.582883,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 62.0
+        }
+      ]
+    },
+    {
+      "at": 1785358751.5870917,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 62.0
+        }
+      ]
+    },
+    {
+      "at": 1785358811.6402442,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 62.0
+        }
+      ]
+    },
+    {
+      "at": 1785358871.516811,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 63.0
+        }
+      ]
+    },
+    {
+      "at": 1785358931.4473464,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 63.0
+        }
+      ]
+    },
+    {
+      "at": 1785358991.4318006,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359051.455961,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359150.719841,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359210.8631482,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359270.6733232,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359330.7295222,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359390.6721833,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359854.3155801,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359909.3151085,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785359969.3099673,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360029.3142817,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360089.4629514,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360234.6568835,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360293.1030576,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360344.0950983,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360819.493226,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 64.0
+        }
+      ]
+    },
+    {
+      "at": 1785360878.9282749,
+      "items": [
+        {
+          "key": "codex.primary",
+          "period": "week",
+          "usedPercent": 65.0
+        }
+      ]
+    }
+  ]
+}
