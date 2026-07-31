@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import shutil
+import sqlite3
 import struct
 import subprocess
 import sys
@@ -90,7 +91,7 @@ def config_path(filename: str) -> Path:
 SETTINGS_PATH = config_path("codex_balance_monitor_settings.json")
 QUOTA_HISTORY_PATH = config_path("codex_balance_monitor_quota_history.json")
 STARTUP_REG_NAME = "CodexBalanceMonitor"
-CODEX_HOME = Path.home() / ".codex"
+CODEX_HOME = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex"))
 LOG_DIR = APP_DIR / "logs"
 LOGGER = logging.getLogger("codex_monitor")
 _NATIVE_CRASH_LOG_HANDLE = None
@@ -230,6 +231,61 @@ class AppServerError(RuntimeError):
     pass
 
 
+APPROVAL_REQUEST_METHODS = {
+    "item/commandExecution/requestApproval",
+    "item/fileChange/requestApproval",
+    "item/permissions/requestApproval",
+    "execCommandApproval",
+    "applyPatchApproval",
+}
+USER_INPUT_REQUEST_METHODS = {"tool/requestUserInput"}
+MCP_ELICITATION_REQUEST_METHODS = {"mcpServer/elicitation/request"}
+
+
+def is_approval_request_method(method: object) -> bool:
+    text = str(method or "")
+    lower = text.lower()
+    return (
+        lower in {item.lower() for item in APPROVAL_REQUEST_METHODS}
+        or lower.endswith("/requestapproval")
+    )
+
+
+def manual_request_flag(method: object) -> str:
+    lower = str(method or "").lower()
+    if is_approval_request_method(method):
+        return "waitingOnApproval"
+    if lower in {item.lower() for item in USER_INPUT_REQUEST_METHODS}:
+        return "waitingOnUserInput"
+    if lower in {item.lower() for item in MCP_ELICITATION_REQUEST_METHODS}:
+        return "waitingOnUserInput"
+    return ""
+
+
+def is_manual_request_method(method: object) -> bool:
+    return bool(manual_request_flag(method))
+
+
+def apply_manual_request(
+    thread: dict,
+    method: object,
+    payload: object,
+    request_id: object | None = None,
+) -> None:
+    flag = manual_request_flag(method)
+    if not flag:
+        return
+    thread["status"] = {"type": "active", "activeFlags": [flag]}
+    detail = approval_text_from_payload(payload)
+    thread["_manualRequest"] = {
+        "method": str(method),
+        "requestId": str(request_id) if request_id not in (None, "") else "",
+        "detail": detail,
+    }
+    if detail:
+        thread["preview"] = detail
+
+
 class CodexIpcActivityClient:
     """Optional listener for the VS Code / desktop Codex IPC router."""
 
@@ -367,6 +423,17 @@ class CodexIpcActivityClient:
         params = message.get("params")
         if not isinstance(params, dict):
             params = {}
+        nested_method = find_first_value(
+            params,
+            ("method", "requestMethod", "request_method"),
+        )
+        manual_method = (
+            method
+            if is_manual_request_method(method)
+            else nested_method
+            if is_manual_request_method(nested_method)
+            else ""
+        )
 
         thread_id = find_first_value(
             params,
@@ -405,6 +472,8 @@ class CodexIpcActivityClient:
 
         if method in self.IDLE_METHODS:
             thread["status"] = {"type": "idle"}
+        elif manual_method:
+            apply_manual_request(thread, manual_method, params)
         elif method in self.ACTIVE_METHODS:
             thread["status"] = status or {"type": "active", "activeFlags": []}
         elif method == "thread-stream-following-changed":
@@ -697,6 +766,11 @@ class CodexAppServerClient:
 
         if method == "thread/status/changed":
             thread["status"] = params.get("status") or params.get("state")
+            status = thread["status"]
+            if not status_looks_waiting_approval(status):
+                thread["_manualRequest"] = None
+        elif is_manual_request_method(method):
+            apply_manual_request(thread, method, params)
         elif method in ("turn/started", "thread/started"):
             thread["status"] = {"type": "active", "activeFlags": []}
         elif method in (
@@ -739,6 +813,32 @@ class CodexAppServerClient:
         self.server_requests.append(method)
         if DEBUG_ACCOUNT_EVENTS:
             print("server request", json.dumps(message, ensure_ascii=False), flush=True)
+
+        if is_manual_request_method(method) and isinstance(params, dict):
+            thread_id = find_first_value(
+                params,
+                (
+                    "threadId",
+                    "thread_id",
+                    "conversationId",
+                    "conversation_id",
+                    "sessionId",
+                ),
+            )
+            if thread_id:
+                thread = {
+                    "id": str(thread_id),
+                    "name": str(
+                        find_first_value(params, ("name", "title", "summary"))
+                        or "Chating"
+                    ),
+                    "updatedAt": time.time(),
+                    "source": "通知",
+                    "_ipcMethod": method,
+                }
+                apply_manual_request(thread, method, params, request_id)
+                with self.event_lock:
+                    self.thread_events[str(thread_id)] = thread
 
         url = find_first_value(params, ("url", "authUrl", "authorizationUrl", "loginUrl"))
         if isinstance(url, str) and url.startswith(("http://", "https://")):
@@ -1314,6 +1414,57 @@ def read_session_index() -> dict[str, dict]:
     return sessions
 
 
+def read_state_thread_index() -> dict[str, dict]:
+    """Read the app-server thread index, which can update before JSONL mtime."""
+    state_path = CODEX_HOME / "state_5.sqlite"
+    if not state_path.exists():
+        return {}
+
+    threads: dict[str, dict] = {}
+    try:
+        uri = f"file:{state_path.as_posix()}?mode=ro"
+        with sqlite3.connect(uri, uri=True, timeout=0.2) as connection:
+            rows = connection.execute(
+                """
+                SELECT id, rollout_path, updated_at, updated_at_ms, source,
+                       thread_source, cwd, title, preview, name, archived
+                FROM threads
+                """
+            )
+            for row in rows:
+                (
+                    session_id,
+                    rollout_path,
+                    updated_at,
+                    updated_at_ms,
+                    source,
+                    thread_source,
+                    cwd,
+                    title,
+                    preview,
+                    name,
+                    archived,
+                ) = row
+                if not session_id:
+                    continue
+                threads[str(session_id)] = {
+                    "id": str(session_id),
+                    "rollout_path": rollout_path,
+                    "updated_at": updated_at,
+                    "updated_at_ms": updated_at_ms,
+                    "source": source,
+                    "thread_source": thread_source,
+                    "cwd": cwd,
+                    "title": title,
+                    "preview": preview,
+                    "name": name,
+                    "archived": bool(archived),
+                }
+    except (OSError, sqlite3.Error):
+        return {}
+    return threads
+
+
 def read_session_meta(path: Path) -> dict:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
@@ -1390,15 +1541,17 @@ def is_terminal_session_item(item_type: object, payload_type: object, payload: o
 def function_call_arguments(payload: object) -> dict:
     if not isinstance(payload, dict):
         return {}
-    arguments = payload.get("arguments")
-    if isinstance(arguments, dict):
-        return arguments
-    if isinstance(arguments, str):
-        try:
-            parsed = json.loads(arguments)
-        except json.JSONDecodeError:
-            return {}
-        return parsed if isinstance(parsed, dict) else {}
+    for key in ("arguments", "input", "params", "parameters", "request"):
+        arguments = payload.get(key)
+        if isinstance(arguments, dict):
+            return arguments
+        if isinstance(arguments, str):
+            try:
+                parsed = json.loads(arguments)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
     return {}
 
 
@@ -1406,13 +1559,31 @@ def approval_text_from_payload(payload: object) -> str:
     if not isinstance(payload, dict):
         return ""
     arguments = function_call_arguments(payload)
-    reason = arguments.get("justification") or arguments.get("reason")
-    command = arguments.get("command") or arguments.get("cmd")
+    reason = find_first_value(
+        arguments or payload,
+        (
+            "justification",
+            "reason",
+            "prompt",
+            "message",
+            "question",
+            "questions",
+            "title",
+            "description",
+            "serverName",
+        ),
+    )
+    command = find_first_value(
+        arguments or payload,
+        ("command", "cmd", "commandLine", "shellCommand"),
+    )
     if isinstance(command, list):
         command = " ".join(str(part) for part in command)
     if reason and command:
         return clean_thread_text(f"{reason} · {command}")
-    return clean_thread_text(reason or command or payload.get("name") or "等待手动批准")
+    return clean_thread_text(
+        reason or command or payload.get("name") or "等待手动批准"
+    )
 
 
 def is_approval_session_item(item_type: object, payload_type: object, payload: object) -> bool:
@@ -1420,12 +1591,32 @@ def is_approval_session_item(item_type: object, payload_type: object, payload: o
     if isinstance(payload, dict):
         labels.add(str(payload.get("name") or "").lower())
         arguments = function_call_arguments(payload)
-        text = json.dumps(arguments, ensure_ascii=False).lower()
-        if arguments.get("sandbox_permissions") == "require_escalated":
+        text = json.dumps(payload, ensure_ascii=False).lower()
+        status = str(payload.get("status") or payload.get("state") or "").lower()
+        terminal_status = any(
+            marker in status
+            for marker in (
+                "completed",
+                "complete",
+                "succeeded",
+                "failed",
+                "rejected",
+                "cancelled",
+                "canceled",
+            )
+        )
+        if not terminal_status and (
+            "allow chatgpt to run this command" in text
+            or "allow codex to run this command" in text
+        ):
             return True
-        if arguments.get("require_escalated") is True:
+        if not terminal_status and arguments.get("sandbox_permissions") == "require_escalated":
             return True
-        if "require_escalated" in text or "waitingonapproval" in text:
+        if not terminal_status and arguments.get("require_escalated") is True:
+            return True
+        if not terminal_status and (
+            "require_escalated" in text or "waitingonapproval" in text
+        ):
             return True
         for key in ("status", "state", "reason", "message"):
             value = payload.get(key)
@@ -1583,7 +1774,17 @@ def session_file_inventory() -> tuple[list[Path], tuple]:
 
     entries.sort(key=lambda item: item[1], reverse=True)
     files = [item[0] for item in entries]
-    signature = tuple((str(path), mtime_ns, size) for path, mtime_ns, size in entries)
+    signature_parts = [(str(path), mtime_ns, size) for path, mtime_ns, size in entries]
+    for state_name in ("state_5.sqlite", "state_5.sqlite-wal", "state_5.sqlite-shm"):
+        state_path = CODEX_HOME / state_name
+        try:
+            state_stat = state_path.stat()
+        except OSError:
+            continue
+        signature_parts.append(
+            (str(state_path), int(state_stat.st_mtime_ns), int(state_stat.st_size))
+        )
+    signature = tuple(signature_parts)
     return files, signature
 
 
@@ -1601,8 +1802,10 @@ def scan_local_sessions(
     files = files[:limit]
 
     index = read_session_index()
+    state_index = read_state_thread_index()
     now = time.time()
     threads: list[dict] = []
+    seen_session_ids: set[str] = set()
     for path in files:
         try:
             stat = path.stat()
@@ -1619,31 +1822,91 @@ def scan_local_sessions(
             or session_id_from_path(path)
         )
         index_item = index.get(session_id, {})
+        state_item = state_index.get(session_id, {})
+        state_updated_at = comparable_timestamp(
+            state_item.get("updated_at_ms") or state_item.get("updated_at")
+        )
+        updated_at = max(stat.st_mtime, state_updated_at)
+        source = session_source_from_meta(meta)
+        if source == "session-file" and state_item:
+            source = session_source_from_meta(state_item)
         title = (
-            index_item.get("thread_name")
+            state_item.get("title")
+            or state_item.get("name")
+            or index_item.get("thread_name")
             or index_item.get("title")
             or meta.get("thread_name")
             or meta.get("title")
             or meta.get("name")
             or "Chating"
         )
-        age = max(0.0, now - stat.st_mtime)
+        age = max(0.0, now - updated_at)
         is_recent = age <= SESSION_RECENT_SECONDS
         activity = session_activity_from_tail(path, is_recent)
+        # A VS Code session can finish a turn before the next monitor tick.  In
+        # that case the tail correctly says idle, but the file is still a new
+        # conversation from the user's point of view.  Preserve that signal so
+        # the UI can show it briefly instead of dropping it immediately.
+        if (
+            is_recent
+            and activity.get("kind") == "idle"
+            and source == "vscode"
+        ):
+            activity = {
+                **activity,
+                "status": {"type": "recent"},
+                "kind": "recent",
+            }
         threads.append(
             {
                 "id": session_id,
                 "name": str(title),
-                "cwd": meta.get("cwd") or index_item.get("cwd"),
-                "updatedAt": stat.st_mtime,
-                "source": session_source_from_meta(meta),
+                "cwd": meta.get("cwd") or state_item.get("cwd") or index_item.get("cwd"),
+                "updatedAt": updated_at,
+                "source": source,
                 "status": activity.get("status"),
-                "preview": activity.get("preview") or "",
+                "preview": activity.get("preview") or state_item.get("preview") or "",
                 "_activityKind": activity.get("kind") or "",
                 "_sessionPath": str(path),
                 "_sessionInferredActive": is_recent,
+                "_stateDbUpdatedAt": state_updated_at,
                 "_rawSource": meta.get("source"),
                 "_originator": meta.get("originator"),
+            }
+        )
+        seen_session_ids.add(session_id)
+
+    # A thread can exist in the state DB before its rollout file is created or
+    # while that file's mtime is not refreshed by the VS Code window.
+    for session_id, state_item in state_index.items():
+        if session_id in seen_session_ids or state_item.get("archived"):
+            continue
+        updated_at = comparable_timestamp(
+            state_item.get("updated_at_ms") or state_item.get("updated_at")
+        )
+        if updated_at <= 0:
+            continue
+        source = session_source_from_meta(state_item)
+        is_recent = max(0.0, now - updated_at) <= SESSION_RECENT_SECONDS
+        if not is_recent:
+            status = {"type": "idle"}
+            kind = "idle"
+        else:
+            status = {"type": "recent"}
+            kind = "recent"
+        threads.append(
+            {
+                "id": session_id,
+                "name": str(state_item.get("title") or state_item.get("name") or "Chating"),
+                "cwd": state_item.get("cwd"),
+                "updatedAt": updated_at,
+                "source": source,
+                "status": status,
+                "preview": state_item.get("preview") or "",
+                "_activityKind": kind,
+                "_sessionInferredActive": is_recent,
+                "_stateDbUpdatedAt": updated_at,
+                "_stateDbOnly": True,
             }
         )
 
@@ -2201,6 +2464,19 @@ def status_looks_waiting_approval(status: object) -> bool:
     return "approval" in text or "审批" in text or "waitingonapproval" in text
 
 
+def status_is_stream_metadata(status: object) -> bool:
+    """Return whether a transport/subscription status is not activity."""
+    if isinstance(status, dict):
+        status = status.get("type") or status.get("state") or status.get("status")
+    text = str(status or "").strip().lower().replace("-", "_")
+    return text in {
+        "following",
+        "not_following",
+        "subscribed",
+        "unsubscribed",
+    }
+
+
 def merge_thread_results(thread_sources: list[dict]) -> dict:
     merged: dict[str, dict] = {}
     errors: list[str] = []
@@ -2226,6 +2502,24 @@ def merge_thread_results(thread_sources: list[dict]) -> dict:
                     and status_looks_idle(thread.get("status"))
                     and comparable_timestamp(thread.get("updatedAt"))
                     >= comparable_timestamp(old_thread.get("updatedAt"))
+                    and not old_thread.get("_sessionInferredActive")
+                )
+                inferred_active_status = (
+                    "status" in thread
+                    and thread.get("_sessionInferredActive") is True
+                    and not status_looks_idle(thread.get("status"))
+                    and comparable_timestamp(thread.get("updatedAt"))
+                    >= comparable_timestamp(old_thread.get("updatedAt"))
+                )
+                stale_inferred_idle_status = (
+                    "status" in thread
+                    and status_looks_idle(thread.get("status"))
+                    and old_thread.get("_sessionInferredActive") is True
+                )
+                stale_inferred_stream_status = (
+                    "status" in thread
+                    and status_is_stream_metadata(thread.get("status"))
+                    and old_thread.get("_sessionInferredActive") is True
                 )
                 waiting_approval_status = (
                     "status" in thread
@@ -2234,8 +2528,13 @@ def merge_thread_results(thread_sources: list[dict]) -> dict:
                 if (
                     "status" in thread
                     and (
-                        status_priority(thread) >= status_priority(old_thread)
+                        (
+                            status_priority(thread) >= status_priority(old_thread)
+                            and not stale_inferred_idle_status
+                            and not stale_inferred_stream_status
+                        )
                         or newer_idle_status
+                        or inferred_active_status
                         or waiting_approval_status
                     )
                 ):
@@ -2246,6 +2545,7 @@ def merge_thread_results(thread_sources: list[dict]) -> dict:
                         "_sessionInferredActive",
                         "_rawSource",
                         "_originator",
+                        "_manualRequest",
                         "activeFlags",
                         "waitingOnApproval",
                         "waitingOnUserInput",
@@ -2419,6 +2719,8 @@ def summarize_threads(thread_result: dict) -> dict:
             "total": 0,
             "active": 0,
             "manual": [],
+            "approval_threads": [],
+            "approval_count": 0,
             "latest": None,
         }
 
@@ -2427,6 +2729,8 @@ def summarize_threads(thread_result: dict) -> dict:
         threads = []
 
     manual = []
+    approval_threads = []
+    approval_ids: set[str] = set()
     active_threads = []
     active_count = 0
     visible_threads = [
@@ -2436,11 +2740,24 @@ def summarize_threads(thread_result: dict) -> dict:
     ]
     for thread in visible_threads:
         label, _color, flags = thread_activity_info(thread)
-        if label in ("执行中", "思考中", "输出中", "运行中", "等待审批", "等待输入"):
+        if label in (
+            "执行中",
+            "思考中",
+            "输出中",
+            "运行中",
+            "等待审批",
+            "等待输入",
+            "最近有变化",
+        ):
             active_count += 1
             active_threads.append(thread)
         if "waitingOnApproval" in flags or "waitingOnUserInput" in flags:
             manual.append(thread)
+        if "waitingOnApproval" in flags:
+            identity = thread_identity(thread)
+            if identity not in approval_ids:
+                approval_ids.add(identity)
+                approval_threads.append(thread)
 
     visible_threads.sort(
         key=lambda thread: comparable_timestamp(thread.get("updatedAt")),
@@ -2464,6 +2781,8 @@ def summarize_threads(thread_result: dict) -> dict:
         "total": len(threads),
         "active": active_count,
         "manual": manual,
+        "approval_threads": approval_threads,
+        "approval_count": len(approval_threads),
         "latest": latest,
     }
 
@@ -2509,6 +2828,7 @@ def activity_breakdown(thread_result: dict) -> dict[str, int]:
         "运行中": 0,
         "等待审批": 0,
         "等待输入": 0,
+        "最近有变化": 0,
     }
     for thread in summarize_threads(thread_result)["active_threads"]:
         if not isinstance(thread, dict):
@@ -3508,7 +3828,15 @@ class CodexBalanceMonitor(QMainWindow):
         counts = activity_breakdown(thread_result)
         detail_parts = [
             f"{label} {counts[label]}"
-            for label in ("思考中", "输出中", "执行中", "运行中", "等待审批", "等待输入")
+            for label in (
+                "思考中",
+                "输出中",
+                "执行中",
+                "运行中",
+                "等待审批",
+                "等待输入",
+                "最近有变化",
+            )
             if counts[label] > 0
         ]
         card._activity_current_label.setText(text)
@@ -4054,10 +4382,51 @@ class CodexBalanceMonitor(QMainWindow):
 
     def _load_activity_snapshot(self, base_result: dict | None = None) -> None:
         try:
+            # Approval prompts are transient app-server / VS Code IPC events;
+            # they may not be written to the session JSONL until after the
+            # user responds.  Include the realtime sources on every activity
+            # tick so "Allow ChatGPT to run this command?" is not missed.
+            threads = self.client.read_realtime_activity_threads(base_result)
+            summary = summarize_threads(threads)
             session_scan = self.client.read_session_scan()
-            threads = merge_current_session_threads(
-                base_result,
-                session_scan=session_scan,
+            session_items = session_scan.get("data") or []
+            session_active = [
+                (
+                    str(item.get("id")),
+                    item.get("status"),
+                    round(max(0.0, time.time() - comparable_timestamp(item.get("updatedAt"))), 1),
+                )
+                for item in session_items
+                if isinstance(item, dict)
+                and item.get("source") == "vscode"
+                and item.get("_sessionInferredActive")
+            ]
+            focus_ids = {item[0] for item in session_active}
+            final_matches = [
+                (
+                    str(item.get("id")),
+                    item.get("status"),
+                    item.get("_sessionInferredActive"),
+                    item.get("_sources"),
+                )
+                for item in threads.get("data", [])
+                if isinstance(item, dict) and str(item.get("id")) in focus_ids
+            ]
+            active_ids = [
+                str(item.get("id"))
+                for item in summary.get("active_threads", [])
+                if isinstance(item, dict)
+            ]
+            LOGGER.debug(
+                "活动扫描完成：home=%s total=%s active=%s approval=%s sources=%s ids=%s session_active=%s final_matches=%s",
+                CODEX_HOME,
+                summary.get("total", 0),
+                summary.get("active", 0),
+                summary.get("approval_count", 0),
+                threads.get("sourceCount", 0),
+                active_ids,
+                session_active,
+                final_matches,
             )
             self.signals.activity_loaded.emit(threads)
         except Exception:
@@ -4109,8 +4478,10 @@ class CodexBalanceMonitor(QMainWindow):
         try:
             self.latest_thread_result = thread_result
             self._render_conversation_status(thread_result)
-            if self.latest_limits_result is not None:
-                self._render_dashboard_activity_status(thread_result)
+            # Activity monitoring is independent from quota loading.  Keep the
+            # dashboard card visible even when rate-limits/auth/network data is
+            # still loading or failed.
+            self._render_dashboard_activity_status(thread_result)
         except Exception:
             LOGGER.exception("活动快照渲染失败")
         finally:

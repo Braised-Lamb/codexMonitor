@@ -14,5 +14,5 @@ temp/
 *.pyo
 *.pyd
 __pycache__/
-build/
-dist/
+build*/
+dist*/
